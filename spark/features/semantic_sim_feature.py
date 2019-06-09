@@ -1,64 +1,71 @@
+from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 from pyspark.sql.window import Window
 from pyspark.sql.functions import udf
 from pyspark.sql.types import *
-from features.feature import *
+from feature import *
 
 class SemanticSimilarityFeature(Feature):
 
-    def __init__(self, name: str, concept_ancestor=None):
+    def __init__(self, name, concept_ancestor=None):
         
         Feature.__init__(self, name)
-        self.direct_child_parent_df = concept_ancestor.where("min_levels_of_separation=1") \
-            .rdd.map(lambda r: (r[1], r[0])).groupByKey().collectAsMap()
-
-    def recur_connect_path_bottom_up(self, concept_id):
-        node_paths = []
-        if concept_id in self.direct_child_parent_df:
-            for parent_concept_id in self.direct_child_parent_df[concept_id]:
-                parent_node_paths = self.recur_connect_path_bottom_up(parent_concept_id)
-
-                if len(parent_node_paths) == 0:
-                    node_paths.append(str(parent_concept_id) + '.' + str(concept_id))
-                for parent_node_path in parent_node_paths:
-                    node_paths.append(str(parent_node_path) + '.' + str(concept_id))
-        return node_paths
-    
-    def calculate_pairwise_sim(self, node_paths_1, node_paths_2):
-        max_score = 0
-        best_node_path_1 = ''
-        best_node_path_2 = ''
-        if (len(node_paths_1)!=0) & (len(node_paths_2)!=0):
-            for node_path_1 in node_paths_1:
-                for node_path_2 in node_paths_2:
-                    score = self.calculate_sim(node_path_1, node_path_2)
-                    if max_score < score:
-                        max_score = score
-                        best_node_path_1 = node_path_1
-                        best_node_path_2 = node_path_2
-        return (max_score, best_node_path_1, best_node_path_2)
-    
-    def calculate_sim(self, node_path_1, node_path_2):
-        node_path_1_ids = node_path_1.split(".")
-        node_path_2_ids = node_path_2.split(".")
-        max_iter = max(len(node_path_1_ids), len(node_path_2_ids))
-
-        shared_distance = 0
-
-        for i in range(max_iter): #0-8
-            if (len(node_path_1_ids) > i) & (len(node_path_2_ids) > i):
-                if node_path_1_ids[i] != node_path_2_ids[i]:
-                    break
-                shared_distance += 1
-        return (shared_distance * 2) / (len(node_path_1_ids) + len(node_path_2_ids))
-    
+        self.concept_ancestor = concept_ancestor;
     
     def annotate(self, training_set):
+            
+        #Join to get all the ancestors of concept_id_1
+        joined_dataset = training_set.join(self.concept_ancestor, col('concept_id_1') == col('descendant_concept_id')) \
+                        .select(col("concept_id_1"), 
+                                col("concept_id_2"), 
+                                col("ancestor_concept_id").alias("ancestor_concept_id_1"), 
+                                col("min_levels_of_separation").alias("distance_1")) \
+
+        #Join to get all the ancestors of concept_id_2
+        joined_dataset = joined_dataset.join(self.concept_ancestor, col('concept_id_2') == col('descendant_concept_id')) \
+                        .select(col("concept_id_1"), 
+                                col("concept_id_2"),
+                                col("ancestor_concept_id_1"),
+                                col("distance_1"),
+                                col("ancestor_concept_id").alias("ancestor_concept_id_2"), 
+                                col("min_levels_of_separation").alias("distance_2"))
         
-        semantic_score = udf(lambda x,y: self.calculate_pairwise_sim(self.recur_connect_path_bottom_up(x),  \
-                 self.recur_connect_path_bottom_up(y))[0], FloatType())
+        #Filter to find the common ancestors of concept_id_1 and concept_id_2
+        joined_dataset = joined_dataset.where("ancestor_concept_id_1 == ancestor_concept_id_2") \
+                        .select(col("concept_id_1"),
+                              col("concept_id_2"),
+                              col("ancestor_concept_id_1").alias("common_ancestor_concept_id"),
+                              col("distance_1"),
+                              col("distance_2"))
         
-        training_set = training_set.withColumn(self.name.replace(" ", "_"), semantic_score('concept_id_1','concept_id_2'));
+        #Find the root concepts
+        root_concepts = self.concept_ancestor.groupBy("descendant_concept_id") \
+            .count().where("count == 1").withColumnRenamed("descendant_concept_id", "root_concept_id")
+            
+        #Retrieve all ancestor descendant relationships for the root concepts
+        root_concept_relationships = root_concepts.join(self.concept_ancestor, root_concepts["root_concept_id"] == self.concept_ancestor["ancestor_concept_id"]) \
+            .select(self.concept_ancestor["ancestor_concept_id"], 
+                    self.concept_ancestor["descendant_concept_id"],
+                    self.concept_ancestor["max_levels_of_separation"].alias("root_distance")) \
+            .where("ancestor_concept_id <> descendant_concept_id")
+        
+        #Join to get all root concepts and their corresponding root_distance
+        joined_dataset = joined_dataset.join(root_concept_relationships, joined_dataset["common_ancestor_concept_id"] == root_concept_relationships["descendant_concept_id"]) \
+            .select("concept_id_1", "concept_id_2", "distance_1", "distance_2", "root_distance")
+        
+        #Compute the semantic similarity
+        joined_dataset = joined_dataset.withColumn("semantic_similarity", 
+                          2 * col("root_distance") / (2 * col("root_distance") + col("distance_1") + col("distance_2")))
+        
+        #Find the maximum semantic similarity
+        joined_dataset = joined_dataset.groupBy("concept_id_1", "concept_id_2") \
+            .max("semantic_similarity") \
+            .withColumnRenamed("max(semantic_similarity)", "semantic_similarity")
+        
+        training_set = training_set.join(joined_dataset, (training_set["concept_id_1"] == joined_dataset["concept_id_1"])
+                                & (training_set["concept_id_2"] == joined_dataset["concept_id_2"]), "left_outer") \
+                        .select([training_set[f] for f in training_set.schema.fieldNames()] + [joined_dataset["semantic_similarity"]])
+
         training_set = training_set.withColumn("is_connected", col(self.name.replace(" ", "_")).isNotNull().cast("integer"))
-        
+
         return training_set
