@@ -13,22 +13,27 @@ class EmbeddingFeature(Feature):
         
         Feature.__init__(self, name)
         
-        target = weights \
-            .join(vocab, weights["wordId"] == vocab["id"]) \
-            .select("standard_concept_id", "vector")
-        
-        context = weights \
-            .join(vocab, weights["wordId"] == vocab["id"] + vocab.count()) \
-            .select("standard_concept_id", "vector")
-        
-        joined = target.join(context, target["standard_concept_id"] == context["standard_concept_id"])
-        
-        semantic_score = udf(lambda v1, v2: ((Vectors.dense(v1) + Vectors.dense(v2)) / 2).toArray().tolist(), ArrayType(DoubleType()))
+        if vocab is None:
+            semantic_score = udf(lambda v: (Vectors.dense(v)).toArray().tolist(), ArrayType(DoubleType()))
+            self.embeddings = weights
+        else:
+            target = weights \
+                .join(vocab, weights["wordId"] == vocab["id"]) \
+                .select("standard_concept_id", "vector")
 
-        self.embeddings = joined.select(
-            target["standard_concept_id"], 
-            semantic_score(target["vector"], context["vector"]).alias("vector")
-        )
+            context = weights \
+                .join(vocab, weights["wordId"] == vocab["id"] + vocab.count()) \
+                .select("standard_concept_id", "vector")
+
+            joined = target.join(context, target["standard_concept_id"] == context["standard_concept_id"])
+
+            semantic_score = udf(lambda v1, v2: ((Vectors.dense(v1) + Vectors.dense(v2)) / 2).toArray().tolist(), ArrayType(DoubleType()))
+
+            self.embeddings = joined.select(
+                target["standard_concept_id"], 
+                semantic_score(target["vector"], context["vector"]).alias("vector")
+            )
+
 
     def annotate(self, training_set):
         

@@ -3,7 +3,7 @@ from pyspark.sql.functions import col
 from pyspark.sql.window import Window
 from pyspark.sql.functions import udf
 from pyspark.sql.types import *
-from feature import *
+from features.feature import *
 
 class SemanticSimilarityFeature(Feature):
 
@@ -11,6 +11,7 @@ class SemanticSimilarityFeature(Feature):
         
         Feature.__init__(self, name)
         self.concept_ancestor = concept_ancestor;
+        self.feature_name = name.lower().replace(" ", "_")
     
     def annotate(self, training_set):
             
@@ -60,12 +61,12 @@ class SemanticSimilarityFeature(Feature):
         #Find the maximum semantic similarity
         joined_dataset = joined_dataset.groupBy("concept_id_1", "concept_id_2") \
             .max("semantic_similarity") \
-            .withColumnRenamed("max(semantic_similarity)", "semantic_similarity")
+            .withColumnRenamed("max(semantic_similarity)", self.feature_name)
         
         training_set = training_set.join(joined_dataset, (training_set["concept_id_1"] == joined_dataset["concept_id_1"])
                                 & (training_set["concept_id_2"] == joined_dataset["concept_id_2"]), "left_outer") \
-                        .select([training_set[f] for f in training_set.schema.fieldNames()] + [joined_dataset["semantic_similarity"]])
+                        .select([training_set[f] for f in training_set.schema.fieldNames()] + [joined_dataset[self.feature_name]])
 
-        training_set = training_set.withColumn("is_connected", col(self.name.replace(" ", "_")).isNotNull().cast("integer"))
+        training_set = training_set.withColumn("is_connected", col(self.feature_name).isNotNull().cast("integer"))
 
         return training_set
