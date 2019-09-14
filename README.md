@@ -16,9 +16,9 @@ All the co-occurrence matrices are computed based off of domain tables from the 
 ## Concept Embeddings Features:
 The GloVe algorithm is run on the co-occurrence matrix to generate the concept embeddings4. As of now only cooccurrence_lifetime is used for computing the embeddings. Except for Lifetime_cooccur_embedding_cosine, 5_year_cooccur_embedding_cosine and Visit_cooccur_embedding_cosine are under development.
 
-##[Abstract Submitted to OHDSI Symposium 2019](documents/PhenotypeFeaturesAbstract.pdf)
+## [Abstract Submitted to OHDSI Symposium 2019](documents/PhenotypeFeaturesAbstract.pdf)
 
-##Poster Presented at OHDSI Symposium 2019
-##![Poster Presented at OHDSI Symposium 2019](documents/OHDSI2019_poster.png)
+## Poster Presented at OHDSI Symposium 2019
+## ![Poster Presented at OHDSI Symposium 2019](documents/OHDSI2019_poster.png)
 [Find OHDSI Symposium 2019 Poster PDF version here.](documents/OHDSI2019_poster.pdf)
 
