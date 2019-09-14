@@ -1,5 +1,12 @@
 # phenotype-features
 
+This study focuses on feature engineering which is a prerequisite for modeling phenotype
+characterization. Based on concept pairs extracted from the eMERGE Network by reference set group,
+four types of features were created. Lexical features describe the linguistic similarity of concept pairs.
+Semantic features measure the distance between two concepts in semantic ontology. Co-occurrence
+features are generated to show the prevalence of two concepts occurring within the same time window.
+The last feature group is concept embeddings which computes the dependence of two concepts.
+
 ## Lexical Features:  
 Lexical Features measures the degree to which the two concepts are similar linguistically. Lexical similarity of 1 means total overlap and 0 means no overlap. In lexical similarity measures we calculated 5 measures for each concept pair including Levenshtein_distance, Levenshtein_ratio, Jaro, Jaro_winkler, Fuzz_partial_ratio.
 ## Semantic Features:
