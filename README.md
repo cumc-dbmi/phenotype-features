@@ -8,3 +8,5 @@ The similarity score between two concepts is based on the likeness of their mean
 All the co-occurrence matrices are computed based off of domain tables from the latest ohdsi_cumc_deid (inpatient and outpatient data) database available on iNYP. Domain tables include condition_occurrence, procedure_occurrence, drug_exposure, measurement, and observation. We used various time windows to measure the co-occurrence matrices, starting from 60 days to lifetime. The matrices are Co-occurrence_60_days/_90_days/_180_days/_360_days/_lifetime.
 ## Concept Embeddings Features:
 The GloVe algorithm is run on the co-occurrence matrix to generate the concept embeddings4. As of now only cooccurrence_lifetime is used for computing the embeddings. Except for Lifetime_cooccur_embedding_cosine, 5_year_cooccur_embedding_cosine and Visit_cooccur_embedding_cosine are under development.
+
+###[Poster presented at OHDSI Symposium 2019](OHDSI2019_poster.pdf)
