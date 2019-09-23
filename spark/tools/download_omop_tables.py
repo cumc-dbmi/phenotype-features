@@ -26,7 +26,7 @@ def download_omop_tables(domain_tables, database_property_file, output_folder):
     config = configparser.ConfigParser()
     config.read(database_property_file)
     properties = config.defaults()
-    base_url = properties["base_url"]
+    base_url = properties['base_url']
        
     with ThreadPoolExecutor() as executor:
         
