@@ -75,7 +75,7 @@ def export_vector_df(vector_df, vocab_df, output_folder):
 
     vector_df.withColumn('embedding', F.array_join(F.col('vector'), ',')) \
         .select('standard_concept_id', 'embedding').repartition(1) \
-        .write.mode('overwrite').option('header', 'true').csv(create_file_path(output_folder, 'embeding_csv'))
+        .write.option('header', 'true').mode('overwrite').csv(create_file_path(output_folder, 'embedding_csv'))
 
 
 def main(input_folder, output_folder, num_components, num_epochs):
