@@ -15,7 +15,7 @@ def find_num_of_records(domain_table_name, properties, column_name, spark_sessio
     return table_max_id
 
 
-def download_omop_tables(domain_table, column_name, properties, output_folder, spark_session):
+def download_omop_tables_with_partitions(domain_table, column_name, properties, output_folder, spark_session):
     table = spark_session.read.format("jdbc") \
         .option("url", properties['base_url']) \
         .option("dbtable", "%s" % domain_table) \
@@ -25,6 +25,15 @@ def download_omop_tables(domain_table, column_name, properties, output_folder, s
         .option("partitionColumn", column_name) \
         .option("lowerBound", 1) \
         .option("upperBound", find_num_of_records(domain_table,properties, column_name, spark_session)) \
+        .load()
+    table.write.mode('overwrite').parquet(output_folder + '/' + str(domain_table) + '/')
+
+def download_omop_tables(domain_table, properties, output_folder, spark_session):
+    table = spark_session.read.format("jdbc") \
+        .option("url", properties['base_url']) \
+        .option("dbtable", "%s" % domain_table) \
+        .option("user", properties['user']) \
+        .option("password", properties['password']) \
         .load()
     table.write.mode('overwrite').parquet(output_folder + '/' + str(domain_table) + '/')
 
@@ -63,12 +72,15 @@ if __name__ == "__main__":
     config.read(credential_path)
     properties = config.defaults()
     downloaded_tables = []
-    OMOP_table_dict = {'condition_occurrence': 'condition_occurrence_id', 'measurement': 'measurement_id',
+    OMOP_table_dict = {'person': 'person_id', 'condition_occurrence': 'condition_occurrence_id', 'measurement': 'measurement_id',
                        'drug_exposure': 'drug_exposure_id', 'procedure_occurrence': 'procedure_occurrence_id',
                        'observation': 'observation_id', 'visit_occurrence': 'visit_occurrence_id'}
     for item in domain_table_list:
         try:
-            download_omop_tables(item, OMOP_table_dict.get(item), properties, download_folder, spark)
+            if item in OMOP_table_dict:
+                download_omop_tables_with_partitions(item, OMOP_table_dict.get(item), properties, download_folder, spark)
+            else:
+                download_omop_tables_with(item, properties, download_folder, spark)
             downloaded_tables.append(item)
             print('table: ' + str(item) + ' is downloaded')
         except Exception as e:
