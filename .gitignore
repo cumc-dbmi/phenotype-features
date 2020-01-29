@@ -1,2 +1,3 @@
 lexical/lexical_analysis_added_as_rows.csv.gz
 spark/features/__pycache__
+spark/omop_database_properties.ini
