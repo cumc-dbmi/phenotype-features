@@ -180,8 +180,6 @@ if __name__ == "__main__":
     log4jLogger = spark.sparkContext._jvm.org.apache.log4j
     LOGGER = log4jLogger.LogManager.getLogger(__name__)
     LOGGER.warn("pyspark script logger initialized")
-    
-    #logger = logging.getLogger('py4j')
 
     domain_tables = []
     for domain_table_name in ARGS.omop_table_list:
