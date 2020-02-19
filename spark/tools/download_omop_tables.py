@@ -80,7 +80,7 @@ if __name__ == "__main__":
             if item in OMOP_table_dict:
                 download_omop_tables_with_partitions(item, OMOP_table_dict.get(item), properties, download_folder, spark)
             else:
-                download_omop_tables_with(item, properties, download_folder, spark)
+                download_omop_tables(item, properties, download_folder, spark)
             downloaded_tables.append(item)
             print('table: ' + str(item) + ' is downloaded')
         except Exception as e:
