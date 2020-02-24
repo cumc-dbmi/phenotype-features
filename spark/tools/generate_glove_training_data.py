@@ -1,4 +1,3 @@
-import logging
 import argparse
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
@@ -6,11 +5,20 @@ import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql import Window
 
+NUM_PARTITIONS = 400
+PATIENT_EVENT = 'patient_event'
+PATIENT_SEGMENT = 'patient_segment'
+
+
 def join_domain_tables(domain_tables):
 
     patient_event = None
 
     for domain_table in domain_tables:
+        
+        #lowercase the schema fields
+        domain_table = domain_table.select([F.col(f_n).alias(f_n.lower()) for f_n in domain_table.schema.fieldNames()])
+        
         #extract the domain concept_id from the table fields. E.g. condition_concept_id from condition_occurrence
         concept_id_field = [f.name for f in domain_table.schema.fields if 'concept_id' in f.name][0]
 
@@ -24,6 +32,7 @@ def join_domain_tables(domain_tables):
             .select(domain_table['person_id'],
                     domain_table[concept_id_field].alias('standard_concept_id'),
                     F.col('date'),
+                    domain_table['visit_occurrence_id'],
                     F.lit(table_domain_field).alias('domain')) \
             .where(F.col('standard_concept_id') != 0)
 
@@ -33,48 +42,6 @@ def join_domain_tables(domain_tables):
             patient_event = patient_event.union(domain_table)
 
     return patient_event
-
-def join_domain_tables_to_visit(domain_tables, visit_occurrence):
-    
-    """Join domain tables to visit_occurrence
-    
-    Keyword arguments:
-    domain_tables -- the array containing the OMOOP domain tabls except visit_occurrence
-    visit_occurrence -- the OMOP visit_occurrence table
-    
-    The function is to join each domain table to visit_occurrence to limit the records that have a valid visit_occurrence_id.
-    In addition, the output columns of the domain table is converted to the same standard format as the following 
-    (person_id, time_window, standard_concept_id, domain). In this case, co-occurrence is defined as those concept ids that have co-occurred within the same visit. 
-    
-    """
-    
-    patient_event = None
-    
-    for domain_table in domain_tables:
-
-        domain_table = domain_table.select([F.col(f_n).alias(f_n.lower()) for f_n in domain_table.schema.fieldNames()])
-
-        #extract the domain concept_id from the table fields. E.g. condition_concept_id from condition_occurrence
-        concept_id_field = [f.name for f in domain_table.schema.fields if "concept_id" in f.name][0]
-        #extract the name of the table
-        table_domain_field = concept_id_field.replace("_concept_id", "")
-        #limit the domain records to those which have a visit_occurrence_id
-        joined_domain_table = domain_table \
-            .join(visit_occurrence, domain_table["visit_occurrence_id"] == visit_occurrence["visit_occurrence_id"])
-        #standardize the output columns
-        domain_table = joined_domain_table \
-            .select(domain_table["person_id"], 
-                domain_table["visit_occurrence_id"].alias("partition"), 
-                domain_table[concept_id_field].alias("standard_concept_id"), 
-                F.lit(table_domain_field).alias("domain"))
-
-        if patient_event == None:
-            patient_event = domain_table
-        else:
-            patient_event = patient_event.union(domain_table)
-        
-    return patient_event
-
 
 def roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor):
 
@@ -94,14 +61,30 @@ def roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor):
     
     return patient_event
 
-def creat_partitions(patient_event, start_date, end_date, window_size):
+def repartition_patient_event(patient_event, output_folder_path):
+    
+    records_per_partition = int(patient_event.count() / NUM_PARTITIONS) + 1
+
+    window_eval = Window \
+        .orderBy(F.desc('count'), 'person_id').rangeBetween(Window.unboundedPreceding, Window.currentRow)
+    patient_event_repartitioned = patient_event.groupBy('person_id').count() \
+        .withColumn('cum_sum',  F.sum('count').over(window_eval)) \
+        .withColumn('partition', (F.col('cum_sum') / records_per_partition).cast('int')) \
+        .select('person_id', 'partition')
+
+    patient_event = patient_event.join(patient_event_repartitioned, 'person_id')
+    
+    patient_event.repartition('partition').write.mode('overwrite').parquet(output_folder_path)
+
+
+def create_time_window_partitions(patient_event, start_date, end_date, window_size):
 
     patient_data = patient_event \
         .withColumnRenamed('date', 'unix_date') \
         .withColumn('date', F.from_unixtime('unix_date').cast(T.DateType())) \
         .withColumn('start_date', F.lit(start_date).cast(T.DateType())) \
         .withColumn('end_date', F.lit(end_date).cast(T.DateType())) \
-        .withColumn('partition', (F.datediff('date', 'start_date') / window_size).cast(T.IntegerType()))
+        .withColumn('patient_segment', (F.datediff('date', 'start_date') / window_size).cast(T.IntegerType()))
 
     return patient_data
 
@@ -109,8 +92,9 @@ def generate_sequences(patient_event, output_path):
 
     join_collection_udf = F.udf(lambda its: ' '.join([str(item) for item in its]), T.StringType())
 
-    patient_event.select('person_id', 'standard_concept_id', 'partition').distinct() \
-        .groupBy('person_id', 'partition') \
+    patient_event.orderBy('person_id', 'patient_segment', 'date') \
+        .select('person_id', 'standard_concept_id', 'patient_segment').distinct() \
+        .groupBy('person_id', 'patient_segment') \
         .agg(join_collection_udf(F.collect_list('standard_concept_id')).alias('concept_list'),
              F.size(F.collect_list('standard_concept_id')).alias('collection_size')) \
         .where(F.col('collection_size') > 1) \
@@ -178,11 +162,11 @@ if __name__ == "__main__":
     ARGS = parser.parse_args()
     
     spark = SparkSession.builder.appName("Generate patient sequences").getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
+    #spark.sparkContext.setLogLevel("WARN")
     
     log4jLogger = spark.sparkContext._jvm.org.apache.log4j
     LOGGER = log4jLogger.LogManager.getLogger(__name__)
-    LOGGER.warn("pyspark script logger initialized")
+    LOGGER.info("pyspark script logger initialized")
 
     domain_tables = []
     for domain_table_name in ARGS.omop_table_list:
@@ -192,21 +176,28 @@ if __name__ == "__main__":
     concept = spark.read.parquet(create_file_path(ARGS.input_folder, 'concept'))
     concept_ancestor = spark.read.parquet(create_file_path(ARGS.input_folder, 'concept_ancestor'))
     
+    LOGGER.info('Started merging patient events from {omop_table_list}'.format(omop_table_list=ARGS.omop_table_list))
+    
+    patient_event = join_domain_tables(domain_tables)
+    patient_event = roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor)
+    repartition_patient_event(patient_event, create_file_path(ARGS.output_folder, PATIENT_EVENT))
+    
+    LOGGER.info('Repartitioning the patient_event dataframe')
+    repartitioned_patient_event = spark.read.parquet(create_file_path(ARGS.output_folder, PATIENT_EVENT))
+     
     if ARGS.visit_occurrence:
-        
-        LOGGER.warn('Generate event sequences using visit_occurrence for {omop_table_list}' \
+        LOGGER.info('Generating event sequences using visit_occurrence_id for {omop_table_list}' \
                          .format(omop_table_list=ARGS.omop_table_list))
         
-        visit_occurrence = spark.read.parquet(create_file_path(ARGS.input_folder, 'visit_occurrence'))
-        patient_event = join_domain_tables_to_visit(domain_tables, visit_occurrence)
-        patient_event = roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor)
-    else:
+        repartitioned_patient_event = repartitioned_patient_event.where(F.col('visit_occurrence_id').isNotNull()) \
+            .withColumnRenamed('visit_occurrence_id', 'patient_segment')
         
+    else:
         start_date = str(datetime.date(int(ARGS.start_year), 1, 1))
         end_date = datetime.datetime.now()
         window_size = ARGS.window_size
         
-        LOGGER.warn('''Generate event sequences using the time window configuration 
+        LOGGER.info('''Generating event sequences using the time window configuration 
         start_date={start_date}
         end_date={end_date}
         window_size={window_size}
@@ -214,10 +205,8 @@ if __name__ == "__main__":
                                                     end_date=end_date,
                                                     window_size=window_size,
                                                     omop_table_list=ARGS.omop_table_list))
-        
-        patient_event = join_domain_tables(domain_tables)
-        patient_event = roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor)
-        patient_event = creat_partitions(patient_event, start_date, end_date, window_size)
+
+        repartitioned_patient_event = create_time_window_partitions(repartitioned_patient_event, start_date, end_date, window_size)
         
 
-    generate_sequences(patient_event, output_path=ARGS.output_folder)
+    generate_sequences(repartitioned_patient_event, output_path=create_file_path(ARGS.output_folder, 'patient_sequence'))
