@@ -51,6 +51,9 @@ def join_domain_tables_to_visit(domain_tables, visit_occurrence):
     patient_event = None
     
     for domain_table in domain_tables:
+
+        domain_table = domain_table.select([F.col(f_n).alias(f_n.lower()) for f_n in domain_table.schema.fieldNames()])
+
         #extract the domain concept_id from the table fields. E.g. condition_concept_id from condition_occurrence
         concept_id_field = [f.name for f in domain_table.schema.fields if "concept_id" in f.name][0]
         #extract the name of the table
