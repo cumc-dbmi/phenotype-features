@@ -5,9 +5,7 @@ import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql import Window
 
-NUM_PARTITIONS = 400
-PATIENT_EVENT = 'patient_event'
-PATIENT_SEGMENT = 'patient_segment'
+NUM_PARTITIONS = 800
 
 
 def join_domain_tables(domain_tables):
@@ -61,20 +59,10 @@ def roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor):
     
     return patient_event
 
-def repartition_patient_event(patient_event, output_folder_path):
-    
-    records_per_partition = int(patient_event.count() / NUM_PARTITIONS) + 1
-
-    window_eval = Window \
-        .orderBy(F.desc('count'), 'person_id').rangeBetween(Window.unboundedPreceding, Window.currentRow)
-    patient_event_repartitioned = patient_event.groupBy('person_id').count() \
-        .withColumn('cum_sum',  F.sum('count').over(window_eval)) \
-        .withColumn('partition', (F.col('cum_sum') / records_per_partition).cast('int')) \
-        .select('person_id', 'partition')
-
-    patient_event = patient_event.join(patient_event_repartitioned, 'person_id')
-    
-    patient_event.repartition('partition').write.mode('overwrite').parquet(output_folder_path)
+def repartition_patient_event(spark, patient_event, output_folder_path):
+    patient_event.repartition(NUM_PARTITIONS, 'person_id') \
+        .write.mode('overwrite').parquet(output_folder_path)
+    return spark.read.parquet(output_folder_path)
 
 
 def create_time_window_partitions(patient_event, start_date, end_date, window_size):
@@ -93,13 +81,18 @@ def generate_sequences(patient_event, output_path):
     join_collection_udf = F.udf(lambda its: ' '.join([str(item) for item in its]), T.StringType())
 
     patient_event.orderBy('person_id', 'patient_segment', 'date') \
-        .select('person_id', 'standard_concept_id', 'patient_segment').distinct() \
+        .repartition(NUM_PARTITIONS, 'person_id', 'patient_segment') \
+        .select('person_id', 'standard_concept_id', 'patient_segment') \
         .groupBy('person_id', 'patient_segment') \
         .agg(join_collection_udf(F.collect_list('standard_concept_id')).alias('concept_list'),
              F.size(F.collect_list('standard_concept_id')).alias('collection_size')) \
         .where(F.col('collection_size') > 1) \
-        .select('concept_list').repartition(1) \
-        .write.mode('overwrite').option('header', 'false').csv(output_path)
+        .write.mode('overwrite').parquet(output_path)
+
+def write_sequences_to_csv(spark, patient_sequence_path, patient_sequence_csv_path):
+    spark.read.parquet(patient_sequence_path).select('concept_list').repartition(1) \
+        .write.mode('overwrite').option('header', 'false').csv(patient_sequence_csv_path)
+
 
 def create_file_path(input_folder, table_name):
 
@@ -158,15 +151,13 @@ if __name__ == "__main__":
                         default=30,
                         required=False)
 
-    
     ARGS = parser.parse_args()
     
     spark = SparkSession.builder.appName("Generate patient sequences").getOrCreate()
-    #spark.sparkContext.setLogLevel("WARN")
     
     log4jLogger = spark.sparkContext._jvm.org.apache.log4j
     LOGGER = log4jLogger.LogManager.getLogger(__name__)
-    LOGGER.info("pyspark script logger initialized")
+    LOGGER.info('Started running the application for generating patient sequences')
 
     domain_tables = []
     for domain_table_name in ARGS.omop_table_list:
@@ -175,28 +166,24 @@ if __name__ == "__main__":
 
     concept = spark.read.parquet(create_file_path(ARGS.input_folder, 'concept'))
     concept_ancestor = spark.read.parquet(create_file_path(ARGS.input_folder, 'concept_ancestor'))
-    
+
     LOGGER.info('Started merging patient events from {omop_table_list}'.format(omop_table_list=ARGS.omop_table_list))
-    
+
     patient_event = join_domain_tables(domain_tables)
     patient_event = roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor)
-    repartition_patient_event(patient_event, create_file_path(ARGS.output_folder, PATIENT_EVENT))
-    
-    LOGGER.info('Repartitioning the patient_event dataframe')
-    repartitioned_patient_event = spark.read.parquet(create_file_path(ARGS.output_folder, PATIENT_EVENT))
-     
+
     if ARGS.visit_occurrence:
         LOGGER.info('Generating event sequences using visit_occurrence_id for {omop_table_list}' \
                          .format(omop_table_list=ARGS.omop_table_list))
-        
-        repartitioned_patient_event = repartitioned_patient_event.where(F.col('visit_occurrence_id').isNotNull()) \
+
+        patient_event = patient_event.where(F.col('visit_occurrence_id').isNotNull()) \
             .withColumnRenamed('visit_occurrence_id', 'patient_segment')
-        
+
     else:
         start_date = str(datetime.date(int(ARGS.start_year), 1, 1))
         end_date = datetime.datetime.now()
         window_size = ARGS.window_size
-        
+
         LOGGER.info('''Generating event sequences using the time window configuration 
         start_date={start_date}
         end_date={end_date}
@@ -206,7 +193,8 @@ if __name__ == "__main__":
                                                     window_size=window_size,
                                                     omop_table_list=ARGS.omop_table_list))
 
-        repartitioned_patient_event = create_time_window_partitions(repartitioned_patient_event, start_date, end_date, window_size)
-        
-
+        patient_event = create_time_window_partitions(patient_event, start_date, end_date, window_size)
+    
+    repartitioned_patient_event = repartition_patient_event(spark, patient_event, create_file_path(ARGS.output_folder, 'patient_event'))
     generate_sequences(repartitioned_patient_event, output_path=create_file_path(ARGS.output_folder, 'patient_sequence'))
+    write_sequences_to_csv(spark, create_file_path(ARGS.output_folder, 'patient_sequence'), create_file_path(ARGS.output_folder, 'patient_sequence_csv'))
