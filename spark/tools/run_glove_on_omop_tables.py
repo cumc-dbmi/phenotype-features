@@ -11,17 +11,20 @@ import argparse
 import re
 import os
 
+GLOVE = 'glove'
 CORPUS_MODEL = 'corpus.model'
 GLOVE_MODEL = 'glove.model'
 
 
+# +
 def get_corpus_model_path(folder):
     return create_file_path(folder, CORPUS_MODEL)
-
 
 def get_glove_model_path(folder):
     return create_file_path(folder, GLOVE_MODEL)
 
+
+# -
 
 def read_corpus(filename):
     delchars = [chr(c) for c in range(256)]
@@ -59,7 +62,7 @@ def run_glove(input_folder, output_folder, num_components, num_epochs):
     pattern = re.compile('.*\\.csv$')
     for file_path in os.listdir(input_folder):
         if re.match(pattern, file_path):
-            train_glove(create_file_path(output_folder, file_path), output_folder, num_components, num_epochs)
+            train_glove(create_file_path(input_folder, file_path), output_folder, num_components, num_epochs)
             break
 
 

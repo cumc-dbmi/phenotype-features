@@ -1,11 +1,14 @@
-import argparse
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
-import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql import Window
 
-NUM_PARTITIONS = 800
+import argparse
+import datetime
+from run_glove_on_omop_tables import *
+from extract_glove_embeddings import *
+
+NUM_PARTITIONS = 400
 
 
 def join_domain_tables(domain_tables):
@@ -59,21 +62,13 @@ def roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor):
     
     return patient_event
 
-def repartition_patient_event(spark, patient_event, output_folder_path):
-    patient_event.repartition(NUM_PARTITIONS, 'person_id') \
-        .write.mode('overwrite').parquet(output_folder_path)
-    return spark.read.parquet(output_folder_path)
-
-
 def create_time_window_partitions(patient_event, start_date, end_date, window_size):
-
     patient_data = patient_event \
         .withColumnRenamed('date', 'unix_date') \
         .withColumn('date', F.from_unixtime('unix_date').cast(T.DateType())) \
         .withColumn('start_date', F.lit(start_date).cast(T.DateType())) \
         .withColumn('end_date', F.lit(end_date).cast(T.DateType())) \
         .withColumn('patient_segment', (F.datediff('date', 'start_date') / window_size).cast(T.IntegerType()))
-
     return patient_data
 
 def generate_sequences(patient_event, output_path):
@@ -89,11 +84,7 @@ def generate_sequences(patient_event, output_path):
         .where(F.col('collection_size') > 1) \
         .write.mode('overwrite').parquet(output_path)
 
-def write_sequences_to_csv(spark, patient_sequence_path, patient_sequence_csv_path):
-    spark.read.parquet(patient_sequence_path).select('concept_list').repartition(1) \
-        .write.mode('overwrite').option('header', 'false').csv(patient_sequence_csv_path)
-
-
+# +
 def create_file_path(input_folder, table_name):
 
     if input_folder[-1] == '/':
@@ -103,8 +94,76 @@ def create_file_path(input_folder, table_name):
 
     return file_path
 
-if __name__ == "__main__":
+def get_patient_event_folder(output_folder):
+    return create_file_path(output_folder, 'patient_event')
 
+def get_patient_sequence_folder(output_folder):
+    return create_file_path(output_folder, 'patient_sequence')
+
+def get_patient_sequence_csv_folder(output_folder):
+    return create_file_path(output_folder, 'patient_sequence_csv')
+
+def repartition_patient_event(spark, patient_event, output_folder_path):
+    patient_event.repartition(NUM_PARTITIONS, 'person_id', 'patient_segment') \
+        .write.mode('overwrite').parquet(output_folder_path)
+    return spark.read.parquet(output_folder_path)
+
+def write_sequences_to_csv(spark, patient_sequence_path, patient_sequence_csv_path):
+    spark.read.parquet(patient_sequence_path).select('concept_list').repartition(1) \
+        .write.mode('overwrite').option('header', 'false').csv(patient_sequence_csv_path)
+
+
+# -
+
+def generate_patient_sequence(spark, 
+                              input_folder, 
+                              output_folder, 
+                              omop_table_list, 
+                              is_visit_based, 
+                              start_year, 
+                              window_size):
+    
+    domain_tables = []
+    for domain_table_name in omop_table_list:
+        domain_table = spark.read.parquet(create_file_path(input_folder, domain_table_name))
+        domain_tables.append(domain_table)
+
+    concept = spark.read.parquet(create_file_path(input_folder, 'concept'))
+    concept_ancestor = spark.read.parquet(create_file_path(input_folder, 'concept_ancestor'))
+
+    LOGGER.info('Started merging patient events from {omop_table_list}'.format(omop_table_list=omop_table_list))
+
+    patient_event = join_domain_tables(domain_tables)
+    patient_event = roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor)
+
+    if is_visit_based:
+        LOGGER.info('Generating event sequences using visit_occurrence_id for {omop_table_list}' \
+                         .format(omop_table_list=omop_table_list))
+
+        patient_event = patient_event.where(F.col('visit_occurrence_id').isNotNull()) \
+            .withColumnRenamed('visit_occurrence_id', 'patient_segment')
+    else:
+        start_date = str(datetime.date(int(start_year), 1, 1))
+        end_date = datetime.datetime.now()
+        
+        LOGGER.info('''Generating event sequences using the time window configuration 
+            start_date={start_date}
+            end_date={end_date}
+            window_size={window_size}
+            omop_table_list={omop_table_list}'''.format(start_date=start_date,
+                                                        end_date=end_date,
+                                                        window_size=window_size,
+                                                        omop_table_list=omop_table_list))
+        
+        patient_event = create_time_window_partitions(patient_event, start_date, end_date, window_size)
+    
+    repartitioned_patient_event = repartition_patient_event(spark, patient_event, get_patient_event_folder(output_folder))
+    generate_sequences(repartitioned_patient_event, get_patient_sequence_folder(output_folder))
+    write_sequences_to_csv(spark, get_patient_sequence_folder(output_folder), get_patient_sequence_csv_folder(output_folder))
+
+
+def parse_args():
+    
     parser = argparse.ArgumentParser(description='Aruguments for generating patient sequences from OMOP tables')
     
     parser.add_argument('-i',
@@ -129,11 +188,28 @@ if __name__ == "__main__":
                         required=True)
     
     parser.add_argument('-v',
-                        '--visit_occurrence',
-                        dest='visit_occurrence',
+                        '--is_visit_based',
+                        dest='is_visit_based',
                         action='store_true',
                         default=False,
                         required=False)
+    
+        
+    parser.add_argument('-n',
+                        '--no_components',
+                        dest='no_components',
+                        action='store',
+                        help='vector size',
+                        required=False,
+                        default=200)
+
+    parser.add_argument('-e',
+                        '--epochs',
+                        dest='epochs',
+                        action='store',
+                        help='The number of epochs that the algorithm will run',
+                        required=False,
+                        default=100)
     
     parser.add_argument('-s',
                         '--start_year',
@@ -151,50 +227,29 @@ if __name__ == "__main__":
                         default=30,
                         required=False)
 
-    ARGS = parser.parse_args()
-    
-    spark = SparkSession.builder.appName("Generate patient sequences").getOrCreate()
-    
+    return parser.parse_args()
+
+if __name__ == "__main__":
+
+    ARGS = parse_args()
+
+    spark = SparkSession.builder.appName('Training Glove').getOrCreate()
     log4jLogger = spark.sparkContext._jvm.org.apache.log4j
     LOGGER = log4jLogger.LogManager.getLogger(__name__)
     LOGGER.info('Started running the application for generating patient sequences')
-
-    domain_tables = []
-    for domain_table_name in ARGS.omop_table_list:
-        domain_table = spark.read.parquet(create_file_path(ARGS.input_folder, domain_table_name))
-        domain_tables.append(domain_table)
-
-    concept = spark.read.parquet(create_file_path(ARGS.input_folder, 'concept'))
-    concept_ancestor = spark.read.parquet(create_file_path(ARGS.input_folder, 'concept_ancestor'))
-
-    LOGGER.info('Started merging patient events from {omop_table_list}'.format(omop_table_list=ARGS.omop_table_list))
-
-    patient_event = join_domain_tables(domain_tables)
-    patient_event = roll_up_to_drug_ingredients(patient_event, concept, concept_ancestor)
-
-    if ARGS.visit_occurrence:
-        LOGGER.info('Generating event sequences using visit_occurrence_id for {omop_table_list}' \
-                         .format(omop_table_list=ARGS.omop_table_list))
-
-        patient_event = patient_event.where(F.col('visit_occurrence_id').isNotNull()) \
-            .withColumnRenamed('visit_occurrence_id', 'patient_segment')
-
-    else:
-        start_date = str(datetime.date(int(ARGS.start_year), 1, 1))
-        end_date = datetime.datetime.now()
-        window_size = ARGS.window_size
-
-        LOGGER.info('''Generating event sequences using the time window configuration 
-        start_date={start_date}
-        end_date={end_date}
-        window_size={window_size}
-        omop_table_list={omop_table_list}'''.format(start_date=start_date,
-                                                    end_date=end_date,
-                                                    window_size=window_size,
-                                                    omop_table_list=ARGS.omop_table_list))
-
-        patient_event = create_time_window_partitions(patient_event, start_date, end_date, window_size)
+    generate_patient_sequence(spark, 
+                              ARGS.input_folder, 
+                              ARGS.output_folder, 
+                              ARGS.omop_table_list, 
+                              ARGS.is_visit_based, 
+                              ARGS.start_year, 
+                              ARGS.window_size)
+    LOGGER.info('Finished generating patient sequences')
     
-    repartitioned_patient_event = repartition_patient_event(spark, patient_event, create_file_path(ARGS.output_folder, 'patient_event'))
-    generate_sequences(repartitioned_patient_event, output_path=create_file_path(ARGS.output_folder, 'patient_sequence'))
-    write_sequences_to_csv(spark, create_file_path(ARGS.output_folder, 'patient_sequence'), create_file_path(ARGS.output_folder, 'patient_sequence_csv'))
+    LOGGER.info('Started running the Glove algorithm')
+    run_glove(get_patient_sequence_csv_folder(ARGS.output_folder), ARGS.output_folder, ARGS.no_components, ARGS.epochs)
+    LOGGER.info('Finished running the Glove algorithm')
+
+    LOGGER.info('Started extracting embeddings')
+    extract_embedding(spark, get_glove_model_path(ARGS.output_folder), get_embedding_output(ARGS.output_folder))
+    LOGGER.info('Finished extracting embeddings')

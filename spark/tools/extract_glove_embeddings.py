@@ -5,7 +5,24 @@ from pyspark.sql import types as T
 from glove import Glove
 import argparse
 
-def main(spark, glove_model_path, output_folder):
+EMBEDDING_PATH = 'embedding'
+
+
+def create_file_path(input_folder, table_name):
+
+    if input_folder[-1] == '/':
+        file_path = input_folder + table_name
+    else:
+        file_path = input_folder + '/' + table_name
+
+    return file_path
+
+
+def get_embedding_output(folder):
+    return create_file_path(folder, EMBEDDING_PATH)
+
+
+def extract_embedding(spark, glove_model_path, output_folder):
 
     glove = Glove.load(glove_model_path)
 
@@ -44,4 +61,4 @@ if __name__ == '__main__':
 
     spark = SparkSession.builder.appName('Extract glove embeddings').getOrCreate()
 
-    main(spark, ARGS.glove_model_path, ARGS.output_folder)
+    extract_embedding(spark, ARGS.glove_model_path, ARGS.output_folder)
