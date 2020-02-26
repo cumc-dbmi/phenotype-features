@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
 from pyspark.sql import SparkSession
@@ -9,6 +10,17 @@ import numpy as np
 import argparse
 import re
 import os
+
+CORPUS_MODEL = 'corpus.model'
+GLOVE_MODEL = 'glove.model'
+
+
+def get_corpus_model_path(folder):
+    return create_file_path(folder, CORPUS_MODEL)
+
+
+def get_glove_model_path(folder):
+    return create_file_path(folder, GLOVE_MODEL)
 
 
 def read_corpus(filename):
@@ -29,23 +41,25 @@ def create_file_path(input_folder, table_name):
     return file_path
 
 
-def train_glove(sequence_folder, sequence_file_path, no_components, epochs):
+def train_glove(sequence_file_path, output_folder, no_components, epochs):
     corpus_model = Corpus()
-    corpus_model.fit(read_corpus(create_file_path(sequence_folder, sequence_file_path)), window=10)
-    corpus_model.save(create_file_path(sequence_folder, 'corpus.model'))
+    corpus_model.fit(read_corpus(sequence_file_path), window=10)
+    corpus_model.save(get_corpus_model_path(output_folder))
+    
     print('Dict size: %s' % len(corpus_model.dictionary))
     print('Collocations: %s' % corpus_model.matrix.nnz)
+    
     glove = Glove(no_components=int(no_components), learning_rate=0.05)
     glove.fit(corpus_model.matrix, epochs=int(epochs), no_threads=50, verbose=True)
     glove.add_dictionary(corpus_model.dictionary)
-    glove.save(create_file_path(sequence_folder, 'glove.model'))
+    glove.save(get_glove_model_path(output_folder))
 
 
 def run_glove(input_folder, output_folder, num_components, num_epochs):
     pattern = re.compile('.*\\.csv$')
     for file_path in os.listdir(input_folder):
         if re.match(pattern, file_path):
-            train_glove(output_folder, file_path, num_components, num_epochs)
+            train_glove(create_file_path(output_folder, file_path), output_folder, num_components, num_epochs)
             break
 
 
@@ -72,24 +86,24 @@ def generate_vector_df(spark, glove, vocab_df):
 
 def export_vector_df(vector_df, vocab_df, output_folder):
     vector_df = vector_df.join(vocab_df, 'id').select('standard_concept_id', 'vector')
-
-    vector_df.withColumn('embedding', F.array_join(F.col('vector'), ',')) \
-        .select('standard_concept_id', 'embedding').repartition(1) \
+    vector_df.withColumn('vector', F.array_join(F.col('vector'), ',')) \
+        .select('standard_concept_id', 'vector').repartition(1) \
         .write.option('header', 'true').mode('overwrite').csv(create_file_path(output_folder, 'embedding_csv'))
 
 
 def main(input_folder, output_folder, num_components, num_epochs):
-    spark = SparkSession.builder.appName('Extract embeddings').getOrCreate()
-
+    
     run_glove(input_folder, output_folder, num_components, num_epochs)
 
-    glove = Glove.load(create_file_path(input_folder, 'glove.model'))
-
+    glove = Glove.load(get_glove_model_path(output_folder))
+    
+    spark = SparkSession.builder.appName('Extract embeddings').getOrCreate()
+    
     vocab_df = generate_vocab_df(spark, glove)
 
     vector_df = generate_vector_df(spark, glove, vocab_df)
 
-    export_vector_df(vector_df, vocab_df, input_folder)
+    export_vector_df(vector_df, vocab_df, output_folder)
 
 
 if __name__ == '__main__':
@@ -97,6 +111,13 @@ if __name__ == '__main__':
     parser.add_argument('-i',
                         '--input_folder',
                         dest='input_folder',
+                        action='store',
+                        help='The input folder',
+                        required=True)
+    
+    parser.add_argument('-o',
+                        '--output_folder',
+                        dest='output_folder',
                         action='store',
                         help='The input folder',
                         required=True)
@@ -119,4 +140,4 @@ if __name__ == '__main__':
 
     ARGS = parser.parse_args()
 
-    main(ARGS.input_folder, ARGS.input_folder, ARGS.no_components, ARGS.epochs)
+    main(ARGS.input_folder, ARGS.output_folder, ARGS.no_components, ARGS.epochs)
