@@ -152,24 +152,33 @@ def create_visit_partitions(patient_event, output_path):
         .write.mode('overwrite').parquet(output_path)
 
 
-def generate_sequences(patient_event, output_path):
+def generate_sequences(patient_event, output_path, is_visit_based):
     
     # udf for sorting a list of tuples (date, standard_concept_id) by the key and value 
-    # and concatenating standard_concept_ids to form a sub-window sequence
+    # and concatenating standard_concept_ids to form a sequence
     join_collection_udf = F.udf(lambda its: ' '.join(sorted([str(it[1]) for it in its], key=lambda x: (x[0], x[1]))), T.StringType())
     
-    # group by the sub-window and concatenate the events     
-    patient_event = patient_event \
-        .groupBy('person_id', 'sub_patient_window', 'patient_window') \
-        .agg(join_collection_udf(F.collect_list(F.struct('date', 'standard_concept_id'))).alias('sub_window_concept_list'), 
-             F.size(F.collect_list('standard_concept_id')).alias('sub_window_collection_size')) \
-        
-    # group by the patient window and concatenate the sub-window patient sequence
-    patient_event = patient_event \
-        .groupBy('person_id', 'patient_window') \
-        .agg(join_collection_udf(F.collect_list(F.struct('sub_patient_window', 'sub_window_concept_list'))).alias('concept_list'),
-             F.sum('sub_window_collection_size').alias('collection_size')) \
-        .where(F.col('collection_size') > 1)
+    # if is_visit_based is enabled, patient_window is same as sub-window, it's not necessary to perform a hierarchical groupby operations
+    if is_visit_based:
+        patient_event = patient_event \
+            .groupBy('person_id', 'patient_window') \
+            .agg(join_collection_udf(F.collect_list(F.struct('date', 'standard_concept_id'))).alias('concept_list'), 
+                 F.size(F.collect_list('standard_concept_id')).alias('collection_size')) \
+            .where(F.col('collection_size') > 1)
+    else:
+        # if time_window is enabled, it's necessary to perform a hierarchical groupby operations in order to scale.
+        # group by the sub-window and concatenate the events     
+        patient_event = patient_event \
+            .groupBy('person_id', 'sub_patient_window', 'patient_window') \
+            .agg(join_collection_udf(F.collect_list(F.struct('date', 'standard_concept_id'))).alias('sub_window_concept_list'), 
+                 F.size(F.collect_list('standard_concept_id')).alias('sub_window_collection_size'))
+
+        # group by the patient window and concatenate the sub-window patient sequence
+        patient_event = patient_event \
+            .groupBy('person_id', 'patient_window') \
+            .agg(join_collection_udf(F.collect_list(F.struct('sub_patient_window', 'sub_window_concept_list'))).alias('concept_list'),
+                 F.sum('sub_window_collection_size').alias('collection_size')) \
+            .where(F.col('collection_size') > 1)
     
     patient_event.write.mode('overwrite').parquet(output_path)
 
@@ -218,7 +227,7 @@ def generate_patient_sequence(spark,
                                                       get_patient_event_folder(output_folder))
     
     patient_event = spark.read.parquet(get_patient_event_folder(output_folder))
-    generate_sequences(patient_event, get_patient_sequence_folder(output_folder))
+    generate_sequences(patient_event, get_patient_sequence_folder(output_folder), is_visit_based)
     write_sequences_to_csv(spark, get_patient_sequence_folder(output_folder), get_patient_sequence_csv_folder(output_folder))
 
 
