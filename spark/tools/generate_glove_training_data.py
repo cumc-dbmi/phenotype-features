@@ -9,8 +9,18 @@ from os import path
 from run_glove_on_omop_tables import *
 from extract_glove_embeddings import *
 
+# +
 NUM_PARTITIONS = 800
 
+DOMAIN_KEY_FIELDS = {
+    'condition_occurrence_id' : ('condition_concept_id', 'condition_start_date', 'condition'),
+    'procedure_occurrence_id' : ('procedure_concept_id', 'procedure_date', 'procedure'),
+    'drug_exposure_id' : ('drug_concept_id', 'drug_exposure_start_date', 'drug'),
+    'measurement_id' : ('measurement_concept_id', 'measurement_date', 'measurement')
+}
+
+
+# -
 
 def get_logger(spark):
     log4jLogger = spark.sparkContext._jvm.org.apache.log4j
@@ -40,6 +50,13 @@ def write_sequences_to_csv(spark, patient_sequence_path, patient_sequence_csv_pa
     spark.read.parquet(patient_sequence_path).select('concept_list').repartition(1) \
         .write.mode('overwrite').option('header', 'false').csv(patient_sequence_csv_path)
 
+def get_key_fields(domain_table):
+    field_names = domain_table.schema.fieldNames()
+    for k, v in DOMAIN_KEY_FIELDS.items():
+        if k in field_names:
+            return v
+    return (get_concept_id_field(domain_table), get_domain_date_field(domain_table), get_domain_field(domain_table))
+    
 def get_domain_date_field(domain_table):
     #extract the domain start_date column
     return [f for f in domain_table.schema.fieldNames() if 'date' in f][0]
@@ -60,14 +77,10 @@ def join_domain_tables(domain_tables):
     for domain_table in domain_tables:
         
         #extract the domain concept_id from the table fields. E.g. condition_concept_id from condition_occurrence
-        concept_id_field = get_concept_id_field(domain_table)
-
         #extract the domain start_date column
-        date_field = get_domain_date_field(domain_table)
-
         #extract the name of the table
-        table_domain_field = get_domain_field(domain_table)
-
+        concept_id_field, date_field, table_domain_field = get_key_fields(domain_table) 
+        
         domain_table = domain_table.where(F.col(concept_id_field) != 0) \
             .withColumn('date', F.unix_timestamp(F.to_date(F.col(date_field)), 'yyyy-MM-dd')) \
             .select(domain_table['person_id'],
@@ -77,11 +90,10 @@ def join_domain_tables(domain_tables):
                     F.lit(table_domain_field).alias('domain')) \
             .distinct()
             
-
         if patient_event == None:
             patient_event = domain_table
         else:
-            patient_event = patient_event.union(domain_table)
+            patient_event = patient_event.unionAll(domain_table)
 
     return patient_event
 
@@ -89,8 +101,8 @@ def preprocess_domain_table(spark, input_folder, domain_table_name):
     
     domain_table = spark.read.parquet(create_file_path(input_folder, domain_table_name))
     #lowercase the schema fields
-    domain_table = domain_table.select([F.col(f_n).alias(f_n.lower()) for f_n in domain_table.schema.fieldNames()])
-    domain_field = get_domain_field(domain_table)
+    domain_table = domain_table.select([F.col(f_n).alias(f_n.lower()) for f_n in domain_table.schema.fieldNames()])    
+    _, _, domain_field = get_key_fields(domain_table) 
     
     if domain_field == 'drug' \
         and path.exists(create_file_path(input_folder, 'concept')) \
@@ -114,8 +126,8 @@ def roll_up_to_drug_ingredients(drug_exposure, concept, concept_ancestor):
         .where(concept['concept_class_id'] == 'Ingredient') \
         .select(F.col('drug_concept_id'), F.col('concept_id').alias('ingredient_concept_id'))
     
-    drug_ingredient_fields = [F.col(field_name) for field_name in drug_exposure.schema.fieldNames() if field_name != 'drug_concept_id']
-    drug_ingredient_fields.extend([F.coalesce(F.col('ingredient_concept_id'), F.col('drug_concept_id')).alias('drug_concept_id')])
+    drug_ingredient_fields = [F.coalesce(F.col('ingredient_concept_id'), F.col('drug_concept_id')).alias('drug_concept_id')]
+    drug_ingredient_fields.extend([F.col(field_name) for field_name in drug_exposure.schema.fieldNames() if field_name != 'drug_concept_id'])
     
     drug_exposure = drug_exposure.join(drug_ingredient, 'drug_concept_id', 'left_outer') \
         .select(drug_ingredient_fields)
@@ -146,9 +158,8 @@ def create_visit_partitions(patient_event, output_path):
     patient_event = patient_event \
         .where(F.col('visit_occurrence_id').isNotNull()) \
         .withColumnRenamed('visit_occurrence_id', 'patient_window') \
-        .withColumn('sub_patient_window', F.col('patient_window'))
     
-    patient_event.repartition(NUM_PARTITIONS, 'person_id', 'sub_patient_window') \
+    patient_event.repartition(NUM_PARTITIONS, 'person_id', 'patient_window') \
         .write.mode('overwrite').parquet(output_path)
 
 
@@ -196,6 +207,7 @@ def generate_patient_sequence(spark,
 
     domain_tables = []
     for domain_table_name in omop_table_list:
+        logger.info('Processing {domain_table_name}'.format(domain_table_name=domain_table_name))
         domain_tables.append(preprocess_domain_table(spark, input_folder, domain_table_name))
 
     patient_event = join_domain_tables(domain_tables)
@@ -330,7 +342,7 @@ if __name__ == "__main__":
     LOGGER.info('Finished generating patient sequences')
     
     LOGGER.info('Started running the Glove algorithm')
-    run_glove(get_patient_sequence_csv_folder(ARGS.output_folder), ARGS.output_folder, ARGS.no_components, ARGS.epochs)
+    run_glove(get_patient_sequence_csv_folder(ARGS.output_folder), ARGS.output_folder, ARGS.no_components, ARGS.epochs, ARGS.window_size)
     LOGGER.info('Finished running the Glove algorithm')
 
     LOGGER.info('Started extracting embeddings')
