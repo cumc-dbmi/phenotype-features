@@ -6,69 +6,32 @@ from pyspark.sql import Window
 import argparse
 import datetime
 from os import path
+import pandas as pd
+from sklearn.metrics.pairwise import euclidean_distances
+from sklearn.metrics.pairwise import cosine_similarity
 from run_glove_on_omop_tables import *
 from extract_glove_embeddings import *
 
-# +
+from functools import wraps
+
+from common import *
+
 NUM_PARTITIONS = 800
 
-DOMAIN_KEY_FIELDS = {
-    'condition_occurrence_id' : ('condition_concept_id', 'condition_start_date', 'condition'),
-    'procedure_occurrence_id' : ('procedure_concept_id', 'procedure_date', 'procedure'),
-    'drug_exposure_id' : ('drug_concept_id', 'drug_exposure_start_date', 'drug'),
-    'measurement_id' : ('measurement_concept_id', 'measurement_date', 'measurement')
-}
-
-
-# -
 
 def get_logger(spark):
     log4jLogger = spark.sparkContext._jvm.org.apache.log4j
     return log4jLogger.LogManager.getLogger(__name__)
 
 
-# +
-def create_file_path(input_folder, table_name):
+def compute_pairwise_metric(embedding_path, output_path, func):
+    embedding_pd = pd.read_parquet(embedding_path)
+    vectors = np.array([np.array(v) for v in embedding_pd['vector'].to_numpy()]) 
+    pairwise = func(vectors, vectors)
+    concept_list = embedding_pd['standard_concept_id'].to_list()
+    pairwise_pd = pd.DataFrame(pairwise, index=concept_list, columns=concept_list)
+    pairwise_pd.to_pickle(output_path)
 
-    if input_folder[-1] == '/':
-        file_path = input_folder + table_name
-    else:
-        file_path = input_folder + '/' + table_name
-
-    return file_path
-
-def get_patient_event_folder(output_folder):
-    return create_file_path(output_folder, 'patient_event')
-
-def get_patient_sequence_folder(output_folder):
-    return create_file_path(output_folder, 'patient_sequence')
-
-def get_patient_sequence_csv_folder(output_folder):
-    return create_file_path(output_folder, 'patient_sequence_csv')
-
-def write_sequences_to_csv(spark, patient_sequence_path, patient_sequence_csv_path):
-    spark.read.parquet(patient_sequence_path).select('concept_list').repartition(1) \
-        .write.mode('overwrite').option('header', 'false').csv(patient_sequence_csv_path)
-
-def get_key_fields(domain_table):
-    field_names = domain_table.schema.fieldNames()
-    for k, v in DOMAIN_KEY_FIELDS.items():
-        if k in field_names:
-            return v
-    return (get_concept_id_field(domain_table), get_domain_date_field(domain_table), get_domain_field(domain_table))
-    
-def get_domain_date_field(domain_table):
-    #extract the domain start_date column
-    return [f for f in domain_table.schema.fieldNames() if 'date' in f][0]
-    
-def get_concept_id_field(domain_table):
-    return [f for f in domain_table.schema.fieldNames() if 'concept_id' in f][0]
-
-def get_domain_field(domain_table):
-    return get_concept_id_field(domain_table).replace('_concept_id', '')
-
-
-# -
 
 def join_domain_tables(domain_tables):
 
@@ -96,6 +59,47 @@ def join_domain_tables(domain_tables):
             patient_event = patient_event.unionAll(domain_table)
 
     return patient_event
+
+def join_domain_time_span(domain_tables, span):
+    
+    """Standardize the format of OMOP domain tables using a time frame
+    
+    Keyword arguments:
+    domain_tables -- the array containing the OMOOP domain tabls except visit_occurrence
+    span -- the span of the time window
+    
+    The the output columns of the domain table is converted to the same standard format as the following 
+    (person_id, standard_concept_id, date, lower_bound, upper_bound, domain). 
+    In this case, co-occurrence is defined as those concept ids that have co-occurred 
+    within the same time window of a patient.
+    
+    """
+    joined_domain_tables = []
+    
+    for domain_table in domain_tables:
+        #extract the domain concept_id from the table fields. E.g. condition_concept_id from condition_occurrence
+        #extract the domain start_date column
+        #extract the name of the table
+        concept_id_field, date_field, table_domain_field = get_key_fields(domain_table) 
+
+        domain_table = domain_table.withColumn("date", unix_timestamp(to_date(col(date_field)), "yyyy-MM-dd")) \
+            .withColumn("lower_bound", unix_timestamp(date_add(col(date_field), -span), "yyyy-MM-dd"))\
+            .withColumn("upper_bound", unix_timestamp(date_add(col(date_field), span), "yyyy-MM-dd"))\
+            .withColumn("time_window", lit(1))
+        
+        #standardize the output columns
+        joined_domain_tables.append(
+            domain_table \
+                .select(domain_table["person_id"], 
+                    domain_table[concept_id_field].alias("standard_concept_id"),
+                    domain_table["date"],
+                    domain_table["lower_bound"],
+                    domain_table["upper_bound"],
+                    lit(table_domain_field).alias("domain"))
+        )
+        
+    return joined_domain_tables
+
 
 def preprocess_domain_table(spark, input_folder, domain_table_name):
     
@@ -348,3 +352,9 @@ if __name__ == "__main__":
     LOGGER.info('Started extracting embeddings')
     extract_embedding(spark, get_glove_model_path(ARGS.output_folder), get_embedding_output(ARGS.output_folder))
     LOGGER.info('Finished extracting embeddings')
+    LOGGER.info('Started computing pairwise euclidean distance for embeddings')
+    compute_pairwise_metric(get_embedding_output(ARGS.output_folder), get_pairwise_euclidean_distance_output(ARGS.output_folder), euclidean_distances)
+    compute_pairwise_metric(get_embedding_output(ARGS.output_folder), get_pairwise_cosine_similarity_output(ARGS.output_folder), cosine_similarity)
+    LOGGER.info('Completed computing pairwise euclidean distance for embeddings')
+
+
