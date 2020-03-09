@@ -18,10 +18,52 @@ class PatientSimilarity:
         self.max_cost = max_cost
         self.func = max if is_similarity else min
     
-    def compute(self, similarity_matrix, sequence_1, sequence_2):
+    def match(self, sequence_1, sequence_2):
+        
+        row_size = len(sequence_1)
+        column_size = len(sequence_2)
 
-        matrix = similarity_matrix.get_metric(sequence_1, sequence_2)
+        alignment_scoring_matrix = np.zeros([row_size + 1, column_size + 1])
+        alignment_scoring_matrix[0][1:] = [(i + 1) * self.max_cost for i in range(column_size)]
+        alignment_scoring_matrix[1:, 0] = [(i + 1) * self.max_cost for i in range(row_size)]
 
+        direction_matrix = np.zeros([row_size + 1, column_size + 1], dtype=int)
+        direction_matrix[0][1:] = LEFT
+        direction_matrix[1:, 0] = TOP
+
+        for row in range(1, row_size + 1):
+            for col in range(1, column_size + 1):
+                val_1 = sequence_1[row-1]
+                val_2 = sequence_2[col-1]
+                
+                val = 0 if val_1 == val_2 else 2
+
+                prev_row = row - 1
+                prev_col = col - 1
+
+                diag = alignment_scoring_matrix[prev_row, prev_col]
+                top = alignment_scoring_matrix[prev_row, col]
+                left = alignment_scoring_matrix[row, prev_col]
+
+                new_diag = alignment_scoring_matrix[prev_row, prev_col] + val
+                new_top = alignment_scoring_matrix[prev_row, col] + self.max_cost
+                new_left = alignment_scoring_matrix[row, prev_col] + self.max_cost
+
+                candidates = [(new_diag, diag, DIAG),
+                              (new_top, top, TOP),
+                              (new_left, left, LEFT)]
+
+                (new_value, prev_value, direction) = self.func(candidates, key=lambda x: (x[0], x[1]))
+
+                alignment_scoring_matrix[row, col] = new_value
+                direction_matrix[row, col] = direction
+        
+        normalized_score = alignment_scoring_matrix[-1, -1] * 2 / (len(sequence_1) + len(sequence_2))
+        alignment = self._find_alignment(sequence_1, sequence_2, alignment_scoring_matrix, direction_matrix)
+        return (normalized_score, alignment, alignment_scoring_matrix, direction_matrix)
+    
+    def match_approx(self, matrix, sequence_1, sequence_2):
+        
         row_size, column_size = np.shape(matrix)
 
         alignment_scoring_matrix = np.zeros([row_size + 1, column_size + 1])
@@ -51,9 +93,9 @@ class PatientSimilarity:
                               (new_top, top, TOP),
                               (new_left, left, LEFT)]
 
-                (new_min_value, prev_min_value, direction) = self.func(candidates, key=lambda x: (x[0], x[1]))
+                (new_value, prev_value, direction) = self.func(candidates, key=lambda x: (x[0], x[1]))
 
-                alignment_scoring_matrix[row, col] = new_min_value
+                alignment_scoring_matrix[row, col] = new_value
                 direction_matrix[row, col] = direction
         
         normalized_score = alignment_scoring_matrix[-1, -1] * 2 / (len(sequence_1) + len(sequence_2))

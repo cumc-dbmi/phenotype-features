@@ -43,13 +43,15 @@ class EuclideanDistance:
         return self.pairwise_dist.loc[concept_id_1, concept_id_2]
     
     def get_metric(self, list_1, list_2):
-        return self.pairwise_dist.loc[list_1, list_2]
+        filtered_list_1 = [c for c in list_1 if c in self.all_concept_ids]
+        filtered_list_2 = [c for c in list_2 if c in self.all_concept_ids]
+        return self.pairwise_dist.loc[filtered_list_1, filtered_list_2]
     
-    def get_closest(self, concept_id, num=10):
+    def get_closest(self, concept_id, num=10, ascending=True):
         if not self._validate_concept_id(concept_id):
             return None
         index = self.pairwise_dist.loc[concept_id].index != concept_id
-        return self.pairwise_dist.loc[concept_id][index].sort_values(ascending=True)[0:num]
+        return self.pairwise_dist.loc[concept_id][index].sort_values(ascending=ascending)[0:num]
     
     def compute_random_average_dist(self, k):
         return self.compute_average_dist(concept_list=self._get_ramdom_concept_ids(k), name=self.name + '_random_sample')
@@ -62,3 +64,5 @@ class EuclideanDistance:
             self.logger.error('{concept_id} does not exsit'.format(concept_id=concept_id))
             return False
         return True
+
+
