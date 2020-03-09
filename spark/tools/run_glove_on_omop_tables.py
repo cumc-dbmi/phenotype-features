@@ -44,9 +44,9 @@ def create_file_path(input_folder, table_name):
     return file_path
 
 
-def train_glove(sequence_file_path, output_folder, no_components, epochs):
+def train_glove(sequence_file_path, output_folder, no_components, epochs, window_size):
     corpus_model = Corpus()
-    corpus_model.fit(read_corpus(sequence_file_path), window=10)
+    corpus_model.fit(read_corpus(sequence_file_path), window=100000)
     corpus_model.save(get_corpus_model_path(output_folder))
     
     print('Dict size: %s' % len(corpus_model.dictionary))
@@ -58,11 +58,11 @@ def train_glove(sequence_file_path, output_folder, no_components, epochs):
     glove.save(get_glove_model_path(output_folder))
 
 
-def run_glove(input_folder, output_folder, num_components, num_epochs):
+def run_glove(input_folder, output_folder, num_components, num_epochs, window_size):
     pattern = re.compile('.*\\.csv$')
     for file_path in os.listdir(input_folder):
         if re.match(pattern, file_path):
-            train_glove(create_file_path(input_folder, file_path), output_folder, num_components, num_epochs)
+            train_glove(create_file_path(input_folder, file_path), output_folder, num_components, num_epochs, window_size)
             break
 
 
@@ -94,9 +94,9 @@ def export_vector_df(vector_df, vocab_df, output_folder):
         .write.option('header', 'true').mode('overwrite').csv(create_file_path(output_folder, 'embedding_csv'))
 
 
-def main(input_folder, output_folder, num_components, num_epochs):
+def main(input_folder, output_folder, num_components, num_epochs, window_size):
     
-    run_glove(input_folder, output_folder, num_components, num_epochs)
+    run_glove(input_folder, output_folder, num_components, num_epochs, window_size)
 
     glove = Glove.load(get_glove_model_path(output_folder))
     
@@ -108,6 +108,12 @@ def main(input_folder, output_folder, num_components, num_epochs):
 
     export_vector_df(vector_df, vocab_df, output_folder)
 
+
+# +
+# output_embeddings = ccae_embeddings.repartition(200).join(concept, ccae_embeddings['standard_concept_id'] == concept['concept_id']) \
+#     .select('concept_id', 'concept_name', 'embedding') \
+#     .withColumn('embedding', F.array_join(F.split('embedding', ','), '\t')).orderBy('concept_id')
+# -
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -140,7 +146,15 @@ if __name__ == '__main__':
                         help='The number of epochs that the algorithm will run',
                         required=False,
                         default=100)
+    
+    parser.add_argument('-w',
+                        '--window_size',
+                        dest='window_size',
+                        action='store',
+                        help='The window',
+                        required=False,
+                        default=10)
 
     ARGS = parser.parse_args()
 
-    main(ARGS.input_folder, ARGS.output_folder, ARGS.no_components, ARGS.epochs)
+    main(ARGS.input_folder, ARGS.output_folder, ARGS.no_components, ARGS.epochs, ARGS.window_size)
